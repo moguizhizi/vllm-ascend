@@ -188,9 +188,11 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         norm_layer = partial(RMSNorm, eps=norm_eps)
         self.interleaved = interleaved
         self.enable_pad = False
-        head_dim = self.hidden_size // self.num_heads
-        self.rotary_pos_emb = AscendQwen2_5_VisionRotaryEmbedding(head_dim //
-                                                                  2)
+
+        # head_dim = self.hidden_size // self.num_heads
+        # self.rotary_pos_emb = AscendQwen2_5_VisionRotaryEmbedding(head_dim //
+        #                                                           2)
+
         self.patch_embed = AscendQwen2_5_VisionPatchEmbed(
             patch_size=vision_config.patch_size,
             temporal_patch_size=vision_config.temporal_patch_size,
@@ -222,6 +224,9 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
             self.half_pad_hidden_size_per_attention_head = (
                 MAX_PAD_SIZE - self.hidden_size_per_attention_head) // 2
             self.hidden_size_per_attention_head = MAX_PAD_SIZE
+    
+    def build_rotary_pos_emb(self, head_dim: int):
+        return AscendQwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
     def cal_cos_sin(self, rotary_pos_emb):
         cos = rotary_pos_emb.cos()  # [seqlen, rotary_dim / 2]
