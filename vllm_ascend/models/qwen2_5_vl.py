@@ -447,8 +447,8 @@ class AscendQwen2_5_VLForConditionalGeneration(
         Qwen2_5_VLForConditionalGeneration):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
+        # config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
+        # quant_config = vllm_config.quant_config
  
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         
@@ -459,7 +459,7 @@ class AscendQwen2_5_VLForConditionalGeneration(
         #     prefix=maybe_prefix(prefix, "visual"),
         # )
 
-        self.visual = self.build_visual(config, quant_config, prefix)
+        # self.visual = self.build_visual(config, quant_config, prefix)
     
     def build_visual(self, config, quant_config, prefix):
         return AscendQwen2_5_VisionTransformer(
