@@ -446,20 +446,8 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
 class AscendQwen2_5_VLForConditionalGeneration(
         Qwen2_5_VLForConditionalGeneration):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        # config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
-        # quant_config = vllm_config.quant_config
- 
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""): 
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        
-        # self.visual = AscendQwen2_5_VisionTransformer(
-        #     vision_config=config.vision_config,
-        #     norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-        #     quant_config=self._maybe_ignore_quant_config(quant_config),
-        #     prefix=maybe_prefix(prefix, "visual"),
-        # )
-
-        # self.visual = self.build_visual(config, quant_config, prefix)
     
     def build_visual(self, config, quant_config, prefix):
         return AscendQwen2_5_VisionTransformer(
