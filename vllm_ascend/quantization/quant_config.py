@@ -41,6 +41,13 @@ from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, mlp_tp_enable,
                                oproj_tp_enable)
 
+from collections.abc import Iterable
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
+
 from .utils import get_quant_method
 
 
@@ -106,6 +113,39 @@ class AscendQuantConfig(QuantizationConfig):
             all_prefixes.add(prefix)
 
         return list(ignore_prefixes), list(all_prefixes)
+    
+    def apply_list(self, values: list[str], hf_to_vllm_mapper: "WeightsMapper" ) -> dict[str, str]:
+        return {
+            out_name: name
+            for name in values
+            if (out_name := hf_to_vllm_mapper._map_name(name)) is not None
+        }
+
+    def apply_fields(self, hf_to_vllm_mapper: "WeightsMapper",
+                     field_map: dict[str, list[str]],
+                     as_keys: set[str] | None = None,):
+        """
+        通用映射工具：
+        - field_map: {attr_name: values_to_map}
+        - as_keys: 哪些属性只保留 keys，而不是完整的 dict
+        """
+        as_keys = as_keys or set()
+        for attr, values in field_map.items():
+            mapped = self.apply_list(values, hf_to_vllm_mapper)
+            if attr in as_keys:
+                setattr(self, attr, list(mapped.keys()))
+            else:
+                setattr(self, attr, mapped)
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        self.apply_fields(
+            hf_to_vllm_mapper,
+            field_map={
+                "hf_to_vllm_name_map": self.all_prefixes,
+                "ignore_prefixes": self.ignore_prefixes,
+            },
+            as_keys={"ignore_prefixes"},
+        )
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
