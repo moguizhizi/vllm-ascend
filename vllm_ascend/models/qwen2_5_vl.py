@@ -351,14 +351,30 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-                if ("attn.proj.weight" in name) and self.enable_pad:
-                    param.data = self.pad_proj_weight(param.data)
-                if ("attn.qkv.weight" in name) and self.enable_pad:
-                    param.data = self.pad_qkv_weight(param.data)
-                if ("attn.qkv.bias" in name) and self.enable_pad:
-                    param.data = self.pad_qkv_bias(param.data)
+                param.data = self.apply_padding(name, param.data, self.enable_pad)
             loaded_params.add(name)
         return loaded_params
+    
+    def apply_padding(self, name: str, param, enable_pad: bool):
+        """根据参数名后缀决定是否进行 padding"""
+        if not enable_pad:
+            return param
+
+        pad_map = {
+            "attn.proj.weight": lambda p: self.pad_proj_weight(p),
+            "attn.qkv.weight": lambda p: self.pad_qkv_common(p),
+            "attn.qkv.weight_scale": lambda p: self.pad_qkv_common(p, has_hidden_size=False),
+            "attn.qkv.weight_offset": lambda p: self.pad_qkv_common(p, has_hidden_size=False),
+            "attn.qkv.quant_bias": lambda p: self.pad_qkv_common(p, has_hidden_size=False),
+            "attn.qkv.deq_scale": lambda p: self.pad_qkv_common(p, has_hidden_size=False),
+            "attn.qkv.bias": lambda p: self.pad_qkv_common(p, has_hidden_size=False),
+        }
+
+        for suffix, pad_fn in pad_map.items():
+            if name.endswith(suffix):
+                return pad_fn(param)
+
+        return param
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         pos_ids = []
