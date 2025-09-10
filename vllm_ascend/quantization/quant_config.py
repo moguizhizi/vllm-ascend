@@ -86,6 +86,26 @@ class AscendQuantConfig(QuantizationConfig):
         if torch.npu.is_available():
             return ASCEND_QUANTIZATION_METHOD
         return None
+    
+    def get_excluded_layer_prefixes(self, quant_config: Dict[str, Any]) -> tuple[list[str], list[str]]:
+        """获取需要忽略的层和所有层的前缀列表"""
+        ignore_prefixes = set()
+        all_prefixes = set()
+
+        for key, value in quant_config.items():
+            if key == "model_quant_type":
+                continue
+
+            # 获取层前缀（去掉最后一个字段）
+            prefix = key.rsplit(".", 1)[0] if "." in key else key
+
+            # 只有当 key 以 "weight" 结尾 且 value == "FLOAT" 时才忽略
+            if key.endswith("weight") and value == "FLOAT":
+                ignore_prefixes.add(prefix)
+
+            all_prefixes.add(prefix)
+
+        return list(ignore_prefixes), list(all_prefixes)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
