@@ -147,6 +147,25 @@ class AscendQuantConfig(QuantizationConfig):
             as_keys={"ignore_prefixes"},
         )
 
+    def get_origin_prefix(self, prefix: str) -> str:
+        packed_mapping = getattr(self, "packed_modules_mapping", None)
+        if not isinstance(packed_mapping, dict) or not packed_mapping:
+            return prefix
+
+        proj_name = prefix.split(".")[-1]
+        shard_proj_names = packed_mapping.get(proj_name)
+        if not shard_proj_names:
+            return self.hf_to_vllm_name_map.get(prefix, prefix)
+
+        for shard_proj_name in shard_proj_names:
+            shard_name = prefix.rsplit(".", 1)[0] + "." + shard_proj_name
+            mapped_name = self.hf_to_vllm_name_map.get(shard_name)
+            if mapped_name:
+                # 替换最后一段 shard_proj_name -> proj_name
+                return mapped_name.rsplit(".", 1)[0] + "." + proj_name
+
+        return prefix
+
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention
