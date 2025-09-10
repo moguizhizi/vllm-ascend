@@ -61,7 +61,8 @@ class AscendQuantConfig(QuantizationConfig):
 
     def __init__(self, quant_config: Dict[str, Any]):
         super().__init__()
-        self.quant_description = quant_config
+        self.ignore_prefixes, self.all_prefixes = self.get_excluded_layer_prefixes(quant_config)
+        self.hf_to_vllm_name_map: dict[str, str] = dict() 
 
     def __repr__(self) -> str:
         return "AscendQuantConfig:\n" + super().__repr__()
