@@ -247,7 +247,7 @@ class AscendQuantConfig(QuantizationConfig):
         assert should_ignore_layer is not None
         return should_ignore_layer
 
-    def get_quant_method(self, layer: torch.nn.Module,
+    def get_quant_method_origin(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention
         if isinstance(layer, LinearBase):
@@ -274,6 +274,39 @@ class AscendQuantConfig(QuantizationConfig):
                                             self.packed_modules_mapping):
                 return UnquantizedEmbeddingMethod()
             return AscendEmbeddingMethod(self, prefix,
+                                         self.packed_modules_mapping)
+        return None
+    
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention
+
+        origin_prefix = self.get_origin_prefix(prefix)
+
+        if isinstance(layer, LinearBase):
+            if self.should_ignore_layer(prefix, self.ignore_prefixes,
+                                            self.packed_modules_mapping):
+                return UnquantizedLinearMethod()
+            return AscendLinearMethod(self, origin_prefix,
+                                      self.packed_modules_mapping)
+        elif isinstance(layer, Attention) and \
+            'fa_quant_type' in self.quant_description.keys() and \
+            self.quant_description['fa_quant_type'] is not None:
+            return AscendKVCacheMethod(self, origin_prefix)
+        elif isinstance(layer, Attention) and self.quant_description.get(
+                'kv_quant_type') == 'C8':
+            return AscendKVCacheMethod(self, origin_prefix)
+        elif isinstance(layer, FusedMoE):
+            if self.should_ignore_layer(prefix, self.ignore_prefixes,
+                                            self.packed_modules_mapping):
+                return AscendUnquantizedFusedMoEMethod(layer.moe)
+            return AscendFusedMoEMethod(self, prefix,
+                                        self.packed_modules_mapping)
+        elif isinstance(layer, VocabParallelEmbedding):
+            if self.should_ignore_layer(prefix, self.ignore_prefixes,
+                                            self.packed_modules_mapping):
+                return UnquantizedEmbeddingMethod()
+            return AscendEmbeddingMethod(self, origin_prefix,
                                          self.packed_modules_mapping)
         return None
 
