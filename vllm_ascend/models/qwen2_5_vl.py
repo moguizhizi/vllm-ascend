@@ -290,6 +290,39 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
             (0, self.half_pad_hidden_size_per_attention_head, 0, 0)).reshape(
                 self.hidden_size, -1)
         return out_weight
+    
+    def pad_qkv_common(self, data, has_hidden_size: bool = True):
+        """
+        通用 QKV pad 函数:
+        - has_hidden_size=True: 用于 qkv_weight
+        - has_hidden_size=False: 用于 qkv_weight_scale
+        """
+        if has_hidden_size:
+            # [num_heads, 3, origin_head_dim, hidden_size]
+            reshaped = data.reshape(-1, 3, self.origin_hidden_size_per_attention_head, self.hidden_size)
+            dim = 2
+            pad = (0, 0, 0, self.half_pad_hidden_size_per_attention_head)
+        else:
+            # [num_heads, 3, origin_head_dim]
+            reshaped = data.reshape(-1, 3, self.origin_hidden_size_per_attention_head)
+            dim = 2
+            pad = (0, self.half_pad_hidden_size_per_attention_head, 0, 0)
+
+        def pad_half(tensor):
+            return torch.nn.functional.pad(tensor, pad)
+
+        # 切分前后两半
+        first_half = pad_half(reshaped[:, :, :self.half_origin_hidden_size_per_attention_head])
+        second_half = pad_half(reshaped[:, :, self.half_origin_hidden_size_per_attention_head:])
+
+        # 拼接
+        padded = torch.cat([first_half, second_half], dim=dim)
+
+        # 恢复形状
+        if has_hidden_size:
+            return padded.reshape(-1, self.hidden_size)
+        else:
+            return padded.reshape(-1)
 
     def pad_qkv_weight_scale_offset(self, data):
         reshaped_data = data.reshape(
@@ -352,26 +385,49 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-                if ("attn.proj.weight_scale" in name or
-                        "attn.proj.weight_offset" in name) and self.enable_pad:
-                    continue
-                elif ("attn.proj.deq_scale" in name
-                      or "attn.proj.quant_bias" in name) and self.enable_pad:
-                    continue
-                elif ("attn.qkv.weight_scale" in name
-                      or "attn.qkv.weight_offset" in name) and self.enable_pad:
-                    param.data = self.pad_qkv_weight_scale_offset(param.data)
-                elif ("attn.qkv.deq_scale" in name
-                      or "attn.qkv.quant_bias" in name) and self.enable_pad:
-                    param.data = self.pad_qkv_deq_scale_quant_bias(param.data)
-                elif ("attn.proj.weight" in name) and self.enable_pad:
-                    param.data = self.pad_proj_weight(param.data)
-                elif ("attn.qkv.weight" in name) and self.enable_pad:
-                    param.data = self.pad_qkv_weight(param.data)
-                elif ("attn.qkv.bias" in name) and self.enable_pad:
-                    param.data = self.pad_qkv_bias(param.data)
+                # if ("attn.proj.weight_scale" in name or
+                #         "attn.proj.weight_offset" in name) and self.enable_pad:
+                #     continue
+                # elif ("attn.proj.deq_scale" in name
+                #       or "attn.proj.quant_bias" in name) and self.enable_pad:
+                #     continue
+                # elif ("attn.qkv.weight_scale" in name
+                #       or "attn.qkv.weight_offset" in name) and self.enable_pad:
+                #     param.data = self.pad_qkv_weight_scale_offset(param.data)
+                # elif ("attn.qkv.deq_scale" in name
+                #       or "attn.qkv.quant_bias" in name) and self.enable_pad:
+                #     param.data = self.pad_qkv_deq_scale_quant_bias(param.data)
+                # elif ("attn.proj.weight" in name) and self.enable_pad:
+                #     param.data = self.pad_proj_weight(param.data)
+                # elif ("attn.qkv.weight" in name) and self.enable_pad:
+                #     param.data = self.pad_qkv_weight(param.data)
+                # elif ("attn.qkv.bias" in name) and self.enable_pad:
+                #     param.data = self.pad_qkv_bias(param.data)
+                param.data = self.apply_padding(name, param.data, self.enable_pad)
             loaded_params.add(name)
         return loaded_params
+    
+    def apply_padding(self, name: str, param, enable_pad: bool):
+        """根据参数名后缀决定是否进行 padding"""
+        if not enable_pad:
+            return param
+
+        pad_map = {
+            "attn.proj.weight": lambda p: self.pad_proj_weight(p),
+            "attn.qkv.weight": lambda p: self.pad_qkv_common(p),
+            "attn.qkv.weight_scale": lambda p: self.pad_qkv_common(p, has_hidden_size=False),
+            "attn.qkv.weight_offset": lambda p: self.pad_qkv_common(p, has_hidden_size=False),
+            "attn.qkv.quant_bias": lambda p: self.pad_qkv_common(p, has_hidden_size=False),
+            "attn.qkv.deq_scale": lambda p: self.pad_qkv_common(p, has_hidden_size=False),
+            "attn.qkv.bias": lambda p: self.pad_qkv_common(p, has_hidden_size=False),
+        }
+
+        for suffix, pad_fn in pad_map.items():
+            if name.endswith(suffix):
+                return pad_fn(param)
+
+        return param
+
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         pos_ids = []

@@ -44,6 +44,13 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, mlp_tp_enable,
 
 from .utils import get_quant_method
 
+from collections.abc import Iterable
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
+
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
 class AscendQuantConfig(QuantizationConfig):
@@ -56,6 +63,8 @@ class AscendQuantConfig(QuantizationConfig):
     def __init__(self, quant_config: Dict[str, Any]):
         super().__init__()
         self.quant_description = quant_config
+        self.ignore_prefixes, self.all_prefixes = self.get_excluded_layer_prefixes(quant_config)
+        self.hf_to_vllm_name_map: dict[str, str] = dict() 
 
     def __repr__(self) -> str:
         return "AscendQuantConfig:\n" + super().__repr__()
@@ -87,8 +96,197 @@ class AscendQuantConfig(QuantizationConfig):
         if torch.npu.is_available():
             return ASCEND_QUANTIZATION_METHOD
         return None
+    
+    def get_excluded_layer_prefixes(self, quant_config: Dict[str, Any]) -> tuple[list[str], list[str]]:
+        """获取需要忽略的层和所有层的前缀列表"""
+        ignore_prefixes = set()
+        all_prefixes = set()
 
+        for key, value in quant_config.items():
+            if key == "model_quant_type":
+                continue
+
+            # 获取层前缀（去掉最后一个字段）
+            prefix = key.rsplit(".", 1)[0] if "." in key else key
+
+            # 只有当 key 以 "weight" 结尾 且 value == "FLOAT" 时才忽略
+            if key.endswith("weight") and value == "FLOAT":
+                ignore_prefixes.add(prefix)
+
+            all_prefixes.add(prefix)
+
+        return list(ignore_prefixes), list(all_prefixes)
+    
+    def apply_list(self, values: list[str], hf_to_vllm_mapper: "WeightsMapper" ) -> dict[str, str]:
+
+
+        return {
+            out_name: name
+            for name in values
+            if (out_name := hf_to_vllm_mapper._map_name(name)) is not None
+        }
+
+    def apply_fields(self, hf_to_vllm_mapper: "WeightsMapper",
+                     field_map: dict[str, list[str]],
+                     as_keys: set[str] | None = None,):
+        """
+        通用映射工具：
+        - field_map: {attr_name: values_to_map}
+        - as_keys: 哪些属性只保留 keys，而不是完整的 dict
+        """
+
+        as_keys = as_keys or set()
+        for attr, values in field_map.items():
+            mapped = self.apply_list(values, hf_to_vllm_mapper)
+            if attr in as_keys:
+                setattr(self, attr, list(mapped.keys()))
+            else:
+                setattr(self, attr, mapped)
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        self.apply_fields(
+            hf_to_vllm_mapper,
+            field_map={
+                "hf_to_vllm_name_map": self.all_prefixes,
+                "ignore_prefixes": self.ignore_prefixes,
+            },
+            as_keys={"ignore_prefixes"},
+        )
+    
+    def get_origin_prefix(self, prefix: str) -> str:
+        packed_mapping = getattr(self, "packed_modules_mapping", None)
+        if not isinstance(packed_mapping, dict) or not packed_mapping:
+            return prefix
+
+        proj_name = prefix.split(".")[-1]
+        shard_proj_names = packed_mapping.get(proj_name)
+        if not shard_proj_names:
+            return self.hf_to_vllm_name_map.get(prefix, prefix)
+
+        for shard_proj_name in shard_proj_names:
+            shard_name = prefix.rsplit(".", 1)[0] + "." + shard_proj_name
+            mapped_name = self.hf_to_vllm_name_map.get(shard_name)
+            if mapped_name:
+                # 替换最后一段 shard_proj_name -> proj_name
+                return mapped_name.rsplit(".", 1)[0] + "." + proj_name
+
+        return prefix
+    
     def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention
+
+        origin_prefix = self.get_origin_prefix(prefix)
+
+        if isinstance(layer, LinearBase):
+            if self.should_ignore_layer(prefix, self.ignore_prefixes,
+                                            self.packed_modules_mapping):
+                return UnquantizedLinearMethod()
+            return AscendLinearMethod(self, origin_prefix,
+                                      self.packed_modules_mapping)
+        elif isinstance(layer, Attention) and \
+            'fa_quant_type' in self.quant_description.keys() and \
+            self.quant_description['fa_quant_type'] is not None:
+            return AscendKVCacheMethod(self, origin_prefix)
+        elif isinstance(layer, Attention) and self.quant_description.get(
+                'kv_quant_type') == 'C8':
+            return AscendKVCacheMethod(self, origin_prefix)
+        elif isinstance(layer, FusedMoE):
+            if self.should_ignore_layer(prefix, self.ignore_prefixes,
+                                            self.packed_modules_mapping):
+                return AscendUnquantizedFusedMoEMethod(layer.moe)
+            return AscendFusedMoEMethod(self, prefix,
+                                        self.packed_modules_mapping)
+        elif isinstance(layer, VocabParallelEmbedding):
+            if self.should_ignore_layer(prefix, self.ignore_prefixes,
+                                            self.packed_modules_mapping):
+                return UnquantizedEmbeddingMethod()
+            return AscendEmbeddingMethod(self, origin_prefix,
+                                         self.packed_modules_mapping)
+        return None
+    
+    def _is_equal_or_regex_match(self, value: str,
+                             target: str,
+                             check_contains: bool = False) -> bool:
+        """
+        Checks whether a value is exactly equal or a regex match for target
+        if target starts with 're:'. If check_contains is set to True,
+        additionally checks if the target string is contained within the value.
+        """
+
+        if target.startswith("re:"):
+            pattern = target[3:]
+            if re.match(pattern, value):
+                return True
+        elif check_contains:
+            if target.lower() in value.lower():
+                return True
+        elif target == value:
+            return True
+        return False
+    
+    def check_equal_or_regex_match(self, layer_name: str,
+                               targets: Iterable[str] = tuple(),) -> bool:
+        """
+        Checks whether a layer_name is exactly equal or a regex match for
+        if target starts with 're:' to any target in list.
+        """
+        for target in targets:
+            if self._is_equal_or_regex_match(layer_name, target):
+                return True
+        return False
+    
+    def should_ignore_layer(self, layer_name: Optional[str], 
+                            ignore: Iterable[str] = tuple(),
+                            fused_mapping: Mapping[str, list[str]] = MappingProxyType({})) -> bool:
+    
+        if layer_name is None:
+            return False
+
+        # layer_name = model.layers.0.self_attn.qkv_proj
+        # proj_name = qkv_proj
+        proj_name = layer_name.split(".")[-1]
+
+        # Fused layers like gate_up_proj or qkv_proj will not be fused
+        # in the safetensors checkpoint. So, we convert the name
+        # from the fused version to unfused + check to make sure that
+        # each shard of the fused layer has the same scheme.
+        if proj_name in fused_mapping and layer_name not in ignore:
+            shard_proj_names = fused_mapping[proj_name]
+
+            # Convert fused_name --> [shard_names]
+            shard_names = [
+                layer_name.replace(proj_name, shard_proj_name)
+                for shard_proj_name in shard_proj_names
+            ]
+
+            # Layer should be ignored if shards are ignored.
+            should_ignore_layer = None
+            for shard_name in shard_names:
+                should_ignore_shard =self.check_equal_or_regex_match(
+                    layer_name=shard_name, targets=ignore)
+
+                # If shard_idx=0, set layer ignore to match shard.
+                if should_ignore_layer is None:
+                    should_ignore_layer = should_ignore_shard
+
+                # If shard_idx=1+ confirm scheme matches prior shards.
+                elif should_ignore_shard != should_ignore_layer:
+                    raise ValueError(
+                        f"Detected some but not all shards of {proj_name} "
+                        "are quantized. All shards of fused layers "
+                        "to have the same precision.")
+
+        # Unfused layers like down_proj and o_proj will match
+        # the safetensors checkpoint already.
+        else:
+            should_ignore_layer = self.check_equal_or_regex_match(layer_name=layer_name,
+                                                            targets=ignore)
+
+        assert should_ignore_layer is not None
+        return should_ignore_layer
+
+    def get_quant_method_modify(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         vllm_config = get_current_vllm_config()
         model_type = vllm_config.model_config.hf_config.model_type
