@@ -163,8 +163,8 @@ class AscendW4A8DynamicLinearMethod:
         )
         param = torch.nn.Parameter(scale_bias, requires_grad=False)
         layer.register_parameter("weight_scale_bias", param)
-        layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(
-            layer.weight.data.to(torch.int32))
+        # layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(
+        #     layer.weight.data.to(torch.int32))
 
 
 class AscendW4A8DynamicFusedMoEMethod:
