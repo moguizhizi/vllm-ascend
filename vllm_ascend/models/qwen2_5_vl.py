@@ -299,7 +299,7 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         """
         
         is_change = False
-        if len(data.size()) == 1:
+        if data.dim() == 1:
             data = data.unsqueeze(1)
             is_change = True
         
