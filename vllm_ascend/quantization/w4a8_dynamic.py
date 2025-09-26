@@ -96,12 +96,59 @@ class AscendW4A8DynamicLinearMethod:
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = None,
     ) -> torch.Tensor:
-        return torch_npu.npu_weight_quant_batchmatmul(
-            x,
+        """
+        Optimized quantized matrix multiplication function
+
+        Args:
+            x: Input tensor [..., in_features]
+            layer: Layer containing weight and weight_scale_second
+            group_size: Quantization group size
+
+        Returns:
+            Output tensor [..., out_features]
+        """
+        # 1. Save original shape and validate input
+        original_shape = x.shape
+        if x.dim() < 2:
+            raise ValueError(
+                f"Input tensor must have at least 2 dimensions, got {x.dim()}")
+
+        in_features = x.size(-1)
+        expected_in_features = layer.weight.size(0)
+        if in_features != expected_in_features:
+            raise ValueError(
+                f"Input features {in_features} don't match weight dimension {expected_in_features}")
+
+        # 2. Efficiently reshape to 2D tensor
+        batch_dims = original_shape[:-1]  # All dimensions except the last one
+        batch_size = torch.prod(torch.tensor(batch_dims)).item()
+
+        # Use view instead of reshape (faster when memory is contiguous)
+        if x.is_contiguous():
+            x_2d = x.view(batch_size, in_features)
+        else:
+            x_2d = x.reshape(batch_size, in_features)
+
+        # 3. Optimize type conversion (avoid repeated conversions)
+        target_dtype = x.dtype
+        weight_scale = layer.weight_scale_second
+        if weight_scale.dtype != target_dtype:
+            weight_scale = weight_scale.to(target_dtype, non_blocking=True)
+
+        # 4. Batch quantized matrix multiplication
+        result = torch_npu.npu_weight_quant_batchmatmul(
+            x_2d,
             layer.weight,
-            antiquant_scale=layer.weight_scale_second.to(x.dtype),
+            antiquant_scale=weight_scale,
             antiquant_group_size=self.group_size,
-        )
+        )  # Output shape: [batch_size, out_features]
+
+        # 5. Efficiently restore original dimensions
+        out_features = result.size(-1)
+        output_shape = (*batch_dims, out_features)
+
+        # Use reshape for flexibility, but check contiguity
+        return result.reshape(output_shape)
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         if self.transpose_weight:
