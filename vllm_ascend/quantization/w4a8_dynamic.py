@@ -120,6 +120,7 @@ class AscendW4A8DynamicLinearMethod:
                 f"Input features {in_features} don't match weight dimension {expected_in_features}")
 
         # 2. Efficiently reshape to 2D tensor
+        batch_dims = original_shape[:-1]  # All dimensions except the last one
         batch_size = x.numel() // in_features
 
         # Use view instead of reshape (faster when memory is contiguous)
