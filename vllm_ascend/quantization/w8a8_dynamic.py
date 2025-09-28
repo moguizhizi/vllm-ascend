@@ -74,6 +74,7 @@ class AscendW8A8DynamicLinearMethod:
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
         config = getattr(layer, "_ascend_quant_config", {})
+
         if not isinstance(x, tuple):
             output_dtype = config.get("output_dtype", x.dtype)
             quantized_x, dynamic_scale = torch_npu.npu_dynamic_quant(x)
@@ -83,6 +84,7 @@ class AscendW8A8DynamicLinearMethod:
                 f"for pre-quantized input, got config [{config}]")
             output_dtype = config["output_dtype"]
             quantized_x, dynamic_scale = x
+
         pertoken_scale = (dynamic_scale
                           if config.get("pertoken_scale", True) else None)
 
