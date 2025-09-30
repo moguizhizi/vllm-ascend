@@ -67,23 +67,54 @@ class AscendW8A8DynamicLinearMethod:
         return {}
 
     @staticmethod
+    def convert_to_2D(x, layer):
+        # 1. Save original shape and validate input
+        original_shape = x.shape
+        if x.dim() < 2:
+            raise ValueError(
+                f"Input tensor must have at least 2 dimensions, got {x.dim()}")
+
+        in_features = x.size(-1)
+        expected_in_features = layer.weight.size(0)
+        if in_features != expected_in_features:
+            raise ValueError(
+                f"Input features {in_features} don't match weight dimension {expected_in_features}")
+
+        # 2. Efficiently reshape to 2D tensor
+        batch_dims = original_shape[:-1]  # All dimensions except the last one
+        batch_size = x.numel() // in_features
+
+        # Use view instead of reshape (faster when memory is contiguous)
+        if x.is_contiguous():
+            x_2d = x.view(batch_size, in_features)
+        else:
+            x_2d = x.reshape(batch_size, in_features)
+
+        return x_2d, batch_dims
+
+    @staticmethod
     def apply(
         layer: torch.nn.Module,
         x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
+
         config = getattr(layer, "_ascend_quant_config", {})
 
         if not isinstance(x, tuple):
             output_dtype = config.get("output_dtype", x.dtype)
-            quantized_x, dynamic_scale = torch_npu.npu_dynamic_quant(x)
+            x_2d, batch_dims = AscendW8A8DynamicLinearMethod.convert_to_2D(
+                x, layer)
+            quantized_x, dynamic_scale = torch_npu.npu_dynamic_quant(x_2d)
         else:
             assert "output_dtype" in config.keys(), (
                 f"DynamicLinearMethod needs explicitly specified `output_dtype`"
                 f"for pre-quantized input, got config [{config}]")
+
             output_dtype = config["output_dtype"]
             quantized_x, dynamic_scale = x
+            batch_dims = quantized_x.shape[:-1]
 
         pertoken_scale = (dynamic_scale
                           if config.get("pertoken_scale", True) else None)
@@ -96,6 +127,13 @@ class AscendW8A8DynamicLinearMethod:
             bias=bias,
             output_dtype=output_dtype,
         )
+
+        out_features = output.size(-1)
+        output_shape = (*batch_dims, out_features)
+
+        # Use reshape for flexibility, but check contiguity
+        output = output.reshape(output_shape)
+
         return ((output, dynamic_scale)
                 if config.get("return_scale", False) else output)
 
